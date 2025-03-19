@@ -1,5 +1,6 @@
 name: "Component Builder"
 on:
+  pull_request:
   pull_request_target:
 
   # Allows you to run this workflow manually from the Actions tab
@@ -15,25 +16,16 @@ jobs:
       FULL_EMULATION: "true"
       DEBIAN_FRONTEND: noninteractive
     steps:
-      - name: Check out code
-        uses: actions/checkout@v4
-      - name: Install dependencies for VM build
+      - name: check nest virt
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            qemu-system-x86 \
-            libvirt-daemon-system \
-            virtinst cloud-image-utils \
-            libguestfs-tools
-      - name: Tweak hosted runner to enable 'virt-sysprep'
-        # https://bugs.launchpad.net/ubuntu/+source/linux/+bug/759725
-        run: sudo chmod 0644 /boot/vmlinuz*
-      - name: Fetch base Fedora image
-        working-directory: ./containers/fedora
-        run: wget -q https://download.fedoraproject.org/pub/fedora/linux/releases/41/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-41-1.4.x86_64.qcow2
-      - name: Create VM
-        working-directory: ./containers/fedora
-        run: ./build.sh
-      - name: Report results
-        working-directory: ./containers/fedora
-        run: ls -la
+          set -xe
+          is_nested_virt_enabled() {
+            local kvm_nested="unknown"
+            if [ -f "/sys/module/kvm_intel/parameters/nested" ]; then
+               kvm_nested=$( cat /sys/module/kvm_intel/parameters/nested )
+            elif [ -f "/sys/module/kvm_amd/parameters/nested" ]; then
+              kvm_nested=$( cat /sys/module/kvm_amd/parameters/nested )
+            fi
+            [ "$kvm_nested" == "1" ] || [ "$kvm_nested" == "Y" ] || [ "$kvm_nested" == "y" ]
+          }
+          is_nested_virt_enabled
