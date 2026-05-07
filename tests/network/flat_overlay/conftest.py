@@ -1,5 +1,6 @@
 import logging
 import random
+from datetime import datetime, timezone
 
 import pytest
 from kubernetes.dynamic.exceptions import ResourceNotFoundError
@@ -21,7 +22,7 @@ from tests.network.flat_overlay.utils import (
     get_vm_kubevirt_domain_label,
     is_port_number_available,
     start_nc_response_on_vm,
-    wait_for_multi_network_policy_resources,
+    wait_for_network_operator_stable_conditions,
 )
 from utilities.constants import CLUSTER, FLAT_OVERLAY_STR
 from utilities.infra import create_ns
@@ -54,10 +55,15 @@ def network_operator():
 
 @pytest.fixture(scope="module")
 def enable_multi_network_policy_usage(network_operator):
-    with ResourceEditor(patches={network_operator: {"spec": {"useMultiNetworkPolicy": True}}}):
-        wait_for_multi_network_policy_resources(deploy_mnp_crd=True)
+    if network_operator.instance.spec.get("useMultiNetworkPolicy"):
         yield
-    wait_for_multi_network_policy_resources(deploy_mnp_crd=False)
+        return
+    enable_reference_time = datetime.now(tz=timezone.utc)
+    with ResourceEditor(patches={network_operator: {"spec": {"useMultiNetworkPolicy": True}}}):
+        wait_for_network_operator_stable_conditions(reference_time=enable_reference_time)
+        yield
+        disable_reference_time = datetime.now(tz=timezone.utc)
+    wait_for_network_operator_stable_conditions(reference_time=disable_reference_time)
 
 
 @pytest.fixture(scope="module")

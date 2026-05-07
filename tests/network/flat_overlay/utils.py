@@ -1,15 +1,16 @@
 import logging
 import shlex
+from datetime import datetime
 
-from ocp_resources.custom_resource_definition import CustomResourceDefinition
-from ocp_resources.resource import NamespacedResource, Resource
-from timeout_sampler import TimeoutExpiredError, TimeoutSampler
+from ocp_resources.cluster_operator import ClusterOperator
+from ocp_resources.resource import Resource
+from timeout_sampler import TimeoutSampler
 
 from tests.network.constants import IPV4_ADDRESS_SUBNET_PREFIX
 from tests.network.flat_overlay.constants import (
     HTTP_SUCCESS_RESPONSE_STR,
 )
-from utilities.constants import TIMEOUT_3MIN, TIMEOUT_5SEC
+from utilities.constants import TIMEOUT_5SEC, TIMEOUT_10MIN
 from utilities.exceptions import ResourceValueError
 from utilities.infra import ExecCommandOnPod, get_node_selector_dict
 from utilities.network import compose_cloud_init_data_dict
@@ -66,27 +67,38 @@ def create_ip_block(ip_address, ingress=True):
     return [{network_direction: [{"ipBlock": {"cidr": ip_address}}]}]
 
 
-def wait_for_multi_network_policy_resources(deploy_mnp_crd=False):
-    sample = None
-    consecutive_check = 0
-    mnp_crd = CustomResourceDefinition(name=f"multi-networkpolicies.{NamespacedResource.ApiGroup.K8S_CNI_CNCF_IO}")
-    try:
-        sampler = TimeoutSampler(
-            wait_timeout=TIMEOUT_3MIN,
-            sleep=TIMEOUT_5SEC,
-            func=lambda: mnp_crd.exists,
-        )
-        for sample in sampler:
-            if deploy_mnp_crd == bool(sample):
-                # We should make sure that the change in the MNP CRD is stable
-                consecutive_check += 1
-                if consecutive_check == 3:
-                    return
-    except TimeoutExpiredError:
-        LOGGER.error(
-            f"Value for deploying the multi-networkpolicies crd is {deploy_mnp_crd}, but the CRD status doesn't match."
-        )
-        raise
+def wait_for_network_operator_stable_conditions(reference_time):
+    """Wait until ClusterOperator/network has reconciled since `reference_time` and is stable.
+
+    Reconciliation is detected via the `Progressing` condition: only this condition
+    reliably transitions during a CNO config change (Available/Degraded stay True/False
+    throughout a successful reconcile, so their lastTransitionTime is unreliable).
+
+    Returns once Progressing=False with `lastTransitionTime >= reference_time` and the
+    operator is otherwise healthy (Available=True, Degraded=False).
+    """
+    network_co = ClusterOperator(name="network")
+
+    def _is_reconciled_and_healthy():
+        conditions = {cond["type"]: cond for cond in network_co.instance.status.conditions}
+        progressing = conditions.get(Resource.Condition.PROGRESSING)
+        available = conditions.get(Resource.Condition.AVAILABLE)
+        degraded = conditions.get(Resource.Condition.DEGRADED)
+        if not (progressing and available and degraded):
+            return False
+        if progressing["status"] != Resource.Condition.Status.FALSE:
+            return False
+        if available["status"] != Resource.Condition.Status.TRUE:
+            return False
+        if degraded["status"] != Resource.Condition.Status.FALSE:
+            return False
+        progressing_at = datetime.fromisoformat(progressing["lastTransitionTime"].replace("Z", "+00:00"))
+        return progressing_at >= reference_time
+
+    LOGGER.info(f"Waiting for ClusterOperator/network to reconcile after {reference_time.isoformat()}.")
+    for stable in TimeoutSampler(wait_timeout=TIMEOUT_10MIN, sleep=TIMEOUT_5SEC, func=_is_reconciled_and_healthy):
+        if stable:
+            return
 
 
 def get_vm_connection_reply(
